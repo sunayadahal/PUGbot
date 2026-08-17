@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    # An ephemeral database, per the specification: CI never sees a long-lived
+    # debug or production secret.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: pugbot
+          POSTGRES_PASSWORD: pugbot
+          POSTGRES_DB: pugbot_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Documentation
+        # `-D warnings` promotes the missing-docs, broken-intra-doc-link and
+        # missing-errors-doc lints declared in src/lib.rs into build failures.
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Tests
+        run: cargo test --all-features
+        env:
+          PUGBOT_TEST_DATABASE_URL: postgres://pugbot:pugbot@localhost:5432/pugbot_test
+
+      - name: Production build excludes debug tooling
+        run: |
+          cargo build --release
+          if strings target/release/pugbot | grep -q 'yes-delete-everything'; then
+            echo "debug reset tooling leaked into a production build" >&2
+            exit 1
+          fi
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Dependency advisories
+        run: cargo audit
